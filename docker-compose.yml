@@ -1,0 +1,6 @@
+services:
+  web:
+    image: mink7891/cd_docker_project:latest
+    ports:
+      - "80:5000"
+    restart: always
