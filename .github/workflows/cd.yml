@@ -59,6 +59,8 @@ jobs:
             echo "IMAGE_NAME=${{ secrets.DOCKERHUB_USERNAME }}/cd_docker_project:latest" > .env
             echo "APP_PORT=${{ secrets.APP_PORT }}" >> .env
 
+            echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
             docker compose pull
             docker compose down
             docker compose up -d
