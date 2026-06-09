@@ -27,7 +27,7 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/cd_docker_project:latest
+          tags: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/cd_docker_project:latest
 
   deploy:
     needs: build-and-push
@@ -49,17 +49,17 @@ jobs:
             cat > docker-compose.yml <<'EOF'
             services:
               web:
-                image: ${IMAGE_NAME:-yourdockerhub/cd_docker_project:latest}
+                image: ${IMAGE_NAME}
                 container_name: cd_docker_project_web
                 ports:
-                  - "${APP_PORT:-80}:5000"
+                  - "${APP_PORT}:5000"
                 restart: always
             EOF
 
-            echo "IMAGE_NAME=${{ secrets.DOCKERHUB_USERNAME }}/cd_docker_project:latest" > .env
+            echo "IMAGE_NAME=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/cd_docker_project:latest" > .env
             echo "APP_PORT=${{ secrets.APP_PORT }}" >> .env
 
-            echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+            echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login docker.io -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
 
             docker compose pull
             docker compose down
