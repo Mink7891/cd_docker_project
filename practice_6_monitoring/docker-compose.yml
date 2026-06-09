@@ -1,0 +1,73 @@
+services:
+  flask-app:
+    image: ${IMAGE_NAME:-monitoring_project:latest}
+    build: .
+    container_name: monitoring_flask_app
+    ports:
+      - "${APP_PORT:-5006}:5000"
+    volumes:
+      - app_logs:/var/log/flask-app
+    restart: always
+
+  prometheus:
+    image: docker.io/prom/prometheus:v2.55.1
+    container_name: monitoring_prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+    ports:
+      - "${PROMETHEUS_PORT:-9091}:9090"
+    restart: always
+    depends_on:
+      - flask-app
+
+  loki:
+    image: docker.io/grafana/loki:2.9.8
+    container_name: monitoring_loki
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    ports:
+      - "${LOKI_PORT:-3101}:3100"
+    restart: always
+
+  promtail:
+    image: docker.io/grafana/promtail:2.9.8
+    container_name: monitoring_promtail
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./promtail-config.yml:/etc/promtail/config.yml:ro
+      - app_logs:/var/log/flask-app:ro
+    restart: always
+    depends_on:
+      - loki
+      - flask-app
+
+  grafana:
+    image: docker.io/grafana/grafana:11.3.1
+    container_name: monitoring_grafana
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    restart: always
+    depends_on:
+      - prometheus
+      - loki
+
+volumes:
+  app_logs:
+  prometheus_data:
+  grafana_data:
+  loki_data:

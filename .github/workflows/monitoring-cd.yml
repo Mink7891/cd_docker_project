@@ -1,0 +1,285 @@
+name: Monitoring CD Pipeline
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'practice_6_monitoring/**'
+      - '.github/workflows/monitoring-cd.yml'
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Flask image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./practice_6_monitoring
+          file: ./practice_6_monitoring/Dockerfile
+          push: true
+          tags: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/monitoring_project:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy monitoring stack to server via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            PROJECT_DIR=/opt/monitoring_project
+            IMAGE_NAME="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/monitoring_project:latest"
+            APP_PORT="${{ secrets.MONITORING_APP_PORT }}"
+            GRAFANA_PORT="${{ secrets.GRAFANA_PORT }}"
+            PROMETHEUS_PORT="${{ secrets.PROMETHEUS_PORT }}"
+            LOKI_PORT="${{ secrets.LOKI_PORT }}"
+            GRAFANA_ADMIN_PASSWORD="${{ secrets.GRAFANA_ADMIN_PASSWORD }}"
+
+            [ -z "$APP_PORT" ] && APP_PORT="5006"
+            [ -z "$GRAFANA_PORT" ] && GRAFANA_PORT="3001"
+            [ -z "$PROMETHEUS_PORT" ] && PROMETHEUS_PORT="9091"
+            [ -z "$LOKI_PORT" ] && LOKI_PORT="3101"
+            [ -z "$GRAFANA_ADMIN_PASSWORD" ] && GRAFANA_ADMIN_PASSWORD="admin"
+
+            mkdir -p "$PROJECT_DIR"/grafana/provisioning/datasources
+            mkdir -p "$PROJECT_DIR"/grafana/provisioning/dashboards
+            mkdir -p "$PROJECT_DIR"/grafana/dashboards
+            cd "$PROJECT_DIR"
+
+            cat > docker-compose.yml <<'EOF'
+            services:
+              flask-app:
+                image: ${IMAGE_NAME}
+                container_name: monitoring_flask_app
+                ports:
+                  - "${APP_PORT}:5000"
+                volumes:
+                  - app_logs:/var/log/flask-app
+                restart: always
+
+              prometheus:
+                image: docker.io/prom/prometheus:v2.55.1
+                container_name: monitoring_prometheus
+                volumes:
+                  - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+                  - prometheus_data:/prometheus
+                command:
+                  - "--config.file=/etc/prometheus/prometheus.yml"
+                  - "--storage.tsdb.retention.time=7d"
+                ports:
+                  - "${PROMETHEUS_PORT}:9090"
+                restart: always
+                depends_on:
+                  - flask-app
+
+              loki:
+                image: docker.io/grafana/loki:2.9.8
+                container_name: monitoring_loki
+                command: -config.file=/etc/loki/local-config.yaml
+                volumes:
+                  - ./loki-config.yml:/etc/loki/local-config.yaml:ro
+                  - loki_data:/loki
+                ports:
+                  - "${LOKI_PORT}:3100"
+                restart: always
+
+              promtail:
+                image: docker.io/grafana/promtail:2.9.8
+                container_name: monitoring_promtail
+                command: -config.file=/etc/promtail/config.yml
+                volumes:
+                  - ./promtail-config.yml:/etc/promtail/config.yml:ro
+                  - app_logs:/var/log/flask-app:ro
+                restart: always
+                depends_on:
+                  - loki
+                  - flask-app
+
+              grafana:
+                image: docker.io/grafana/grafana:11.3.1
+                container_name: monitoring_grafana
+                ports:
+                  - "${GRAFANA_PORT}:3000"
+                environment:
+                  GF_SECURITY_ADMIN_USER: admin
+                  GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+                  GF_USERS_ALLOW_SIGN_UP: "false"
+                volumes:
+                  - grafana_data:/var/lib/grafana
+                  - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+                  - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+                  - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+                restart: always
+                depends_on:
+                  - prometheus
+                  - loki
+
+            volumes:
+              app_logs:
+              prometheus_data:
+              grafana_data:
+              loki_data:
+            EOF
+
+            cat > prometheus.yml <<'EOF'
+            global:
+              scrape_interval: 5s
+
+            scrape_configs:
+              - job_name: "flask-app"
+                metrics_path: /metrics
+                static_configs:
+                  - targets: ["flask-app:5000"]
+            EOF
+
+            cat > loki-config.yml <<'EOF'
+            auth_enabled: false
+
+            server:
+              http_listen_port: 3100
+
+            common:
+              path_prefix: /loki
+              storage:
+                filesystem:
+                  chunks_directory: /loki/chunks
+                  rules_directory: /loki/rules
+              replication_factor: 1
+              ring:
+                kvstore:
+                  store: inmemory
+
+            schema_config:
+              configs:
+                - from: 2020-10-24
+                  store: boltdb-shipper
+                  object_store: filesystem
+                  schema: v11
+                  index:
+                    prefix: index_
+                    period: 24h
+            EOF
+
+            cat > promtail-config.yml <<'EOF'
+            server:
+              http_listen_port: 9080
+              grpc_listen_port: 0
+
+            positions:
+              filename: /tmp/positions.yaml
+
+            clients:
+              - url: http://loki:3100/loki/api/v1/push
+
+            scrape_configs:
+              - job_name: flask-app-logs
+                static_configs:
+                  - targets:
+                      - localhost
+                    labels:
+                      job: flask-app
+                      service: monitoring_project
+                      __path__: /var/log/flask-app/*.log
+            EOF
+
+            cat > grafana/provisioning/datasources/datasources.yml <<'EOF'
+            apiVersion: 1
+
+            datasources:
+              - name: Prometheus
+                uid: Prometheus
+                type: prometheus
+                access: proxy
+                url: http://prometheus:9090
+                isDefault: true
+                editable: true
+
+              - name: Loki
+                uid: Loki
+                type: loki
+                access: proxy
+                url: http://loki:3100
+                editable: true
+            EOF
+
+            cat > grafana/provisioning/dashboards/dashboards.yml <<'EOF'
+            apiVersion: 1
+
+            providers:
+              - name: Monitoring Project
+                orgId: 1
+                folder: DevOps Monitoring
+                type: file
+                disableDeletion: false
+                updateIntervalSeconds: 10
+                allowUiUpdates: true
+                options:
+                  path: /var/lib/grafana/dashboards
+            EOF
+
+            cat > grafana/dashboards/monitoring_dashboard.json <<'EOF'
+            {
+              "annotations": {"list": []},
+              "editable": true,
+              "fiscalYearStartMonth": 0,
+              "graphTooltip": 0,
+              "id": null,
+              "links": [],
+              "liveNow": false,
+              "panels": [
+                {"datasource": {"type": "prometheus", "uid": "Prometheus"}, "fieldConfig": {"defaults": {}, "overrides": []}, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}, "id": 1, "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single", "sort": "none"}}, "targets": [{"expr": "sum(rate(flask_app_requests_total[1m]))", "legendFormat": "requests/sec", "refId": "A"}], "title": "Flask request rate", "type": "timeseries"},
+                {"datasource": {"type": "prometheus", "uid": "Prometheus"}, "fieldConfig": {"defaults": {}, "overrides": []}, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}, "id": 2, "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single", "sort": "none"}}, "targets": [{"expr": "flask_app_requests_total", "legendFormat": "{{endpoint}} {{http_status}}", "refId": "A"}], "title": "Flask requests total", "type": "timeseries"},
+                {"datasource": {"type": "loki", "uid": "Loki"}, "gridPos": {"h": 10, "w": 24, "x": 0, "y": 8}, "id": 3, "options": {"dedupStrategy": "none", "enableLogDetails": true, "prettifyLogMessage": false, "showCommonLabels": false, "showLabels": false, "showTime": true, "sortOrder": "Descending", "wrapLogMessage": true}, "targets": [{"expr": "{job=\"flask-app\"}", "refId": "A"}], "title": "Flask application logs", "type": "logs"}
+              ],
+              "refresh": "5s",
+              "schemaVersion": 39,
+              "tags": ["devops", "monitoring", "flask"],
+              "templating": {"list": []},
+              "time": {"from": "now-15m", "to": "now"},
+              "timepicker": {},
+              "timezone": "browser",
+              "title": "Monitoring Project Dashboard",
+              "uid": "monitoring-project-dashboard",
+              "version": 1,
+              "weekStart": ""
+            }
+            EOF
+
+            cat > .env <<EOF
+            IMAGE_NAME=$IMAGE_NAME
+            APP_PORT=$APP_PORT
+            GRAFANA_PORT=$GRAFANA_PORT
+            PROMETHEUS_PORT=$PROMETHEUS_PORT
+            LOKI_PORT=$LOKI_PORT
+            GRAFANA_ADMIN_PASSWORD=$GRAFANA_ADMIN_PASSWORD
+            EOF
+
+            echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login docker.io -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+            docker pull "$IMAGE_NAME"
+            docker pull docker.io/prom/prometheus:v2.55.1
+            docker pull docker.io/grafana/loki:2.9.8
+            docker pull docker.io/grafana/promtail:2.9.8
+            docker pull docker.io/grafana/grafana:11.3.1
+            docker compose down || true
+            docker compose up -d
+            docker compose ps
