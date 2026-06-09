@@ -1,6 +1,7 @@
 services:
   web:
-    image: mink7891/cd_docker_project:latest
+    image: ${IMAGE_NAME:-yourdockerhub/cd_docker_project:latest}
+    container_name: cd_docker_project_web
     ports:
-      - "80:5000"
+      - "${APP_PORT:-80}:5000"
     restart: always
