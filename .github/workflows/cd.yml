@@ -59,9 +59,12 @@ jobs:
             echo "IMAGE_NAME=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/cd_docker_project:latest" > .env
             echo "APP_PORT=${{ secrets.APP_PORT }}" >> .env
 
+            IMAGE_NAME="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/cd_docker_project:latest"
+
             echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login docker.io -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
 
-            docker compose pull
-            docker compose down
+            docker pull "$IMAGE_NAME"
+
+            docker compose down || true
             docker compose up -d
             docker compose ps
